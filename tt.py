@@ -43,6 +43,12 @@ class Wire:
         for i in range(1, len(self.history)):
             t1, v1 = self.history[i - 1]
             t2, v2 = self.history[i]
+            
+            # THE FIX: Ignore the transition if it is just comparing 
+            # against the t=0 startup initialization.
+            if i == 1 and t1 == 0:
+                continue
+                
             if v1 != v2 and (t2 - t1) <= threshold:
                 glitches.append((t1, t2))
         return glitches
@@ -57,7 +63,6 @@ class Gate:
         self.delay = max(0, delay)
 
     def logic(self, values: List[int]) -> int:
-        # Replaced the massive if/else chain with a modern match/case
         match self.gate_type:
             case "AND":  return int(all(values))
             case "OR":   return int(any(values))
@@ -75,7 +80,7 @@ class Simulator:
         self.circuit = circuit
         self.time = 0
         self._queue: List[Event] = []
-        self._counter = itertools.count()  # Human way to handle tie-breakers deterministically
+        self._counter = itertools.count()
         self.log: List[str] = []
 
     def schedule(self, time: int, wire_name: str, value: int) -> None:
@@ -138,7 +143,6 @@ class Circuit:
             self.recompute_gate(gate, sim)
 
     def initialize_state(self, sim: Simulator) -> None:
-        # Replaced the hallucinated if/else block with a proper topological sort (Kahn's Algorithm)
         in_degree = {g.name: 0 for g in self.gates}
         gate_map = {g.name: g for g in self.gates}
         wire_to_gates = {w: [] for w in self.wires}
@@ -146,7 +150,6 @@ class Circuit:
         for g in self.gates:
             for inp in g.inputs:
                 wire_to_gates[inp].append(g)
-                # Only internal wire dependencies increment the degree
                 if any(other.output == inp for other in self.gates):
                     in_degree[g.name] += 1
 
@@ -184,7 +187,7 @@ class Circuit:
 
 GATE_TYPES = ["AND", "OR", "NOT", "NAND", "NOR", "XOR", "XNOR", "BUF"]
 
-def build_sample_circuit() -> Circuit:
+def build_glitchy_circuit() -> Circuit:
     c = Circuit()
     for name, initial in [("A", 0), ("B", 1), ("C", 0), ("D", 0), ("OUT", 0), ("TAP", 0)]:
         c.add_input(name, initial) if name in {"A", "B"} else c.ensure_wire(name, initial)
@@ -197,6 +200,17 @@ def build_sample_circuit() -> Circuit:
     c.add_gate(Gate("G4", "BUF", ["OUT"], "TAP", delay=1))
     return c
 
+def build_stable_circuit() -> Circuit:
+    c = Circuit()
+    for name, initial in [("A", 0), ("B", 0), ("C", 0), ("D", 0), ("OUT", 0)]:
+        c.add_input(name, initial) if name in {"A", "B"} else c.ensure_wire(name, initial)
+    c.add_output("OUT")
+
+    c.add_gate(Gate("G1", "AND", ["A", "B"], "C", delay=2))
+    c.add_gate(Gate("G2", "OR", ["A", "B"], "D", delay=2))
+    c.add_gate(Gate("G3", "AND", ["C", "D"], "OUT", delay=2))
+    return c
+
 
 class GlitchSimulatorApp:
     def __init__(self, root: tk.Tk):
@@ -204,7 +218,7 @@ class GlitchSimulatorApp:
         self.root.title("Glitch Detection Simulator")
         self.root.geometry("1200x760")
 
-        self.circuit = build_sample_circuit()
+        self.circuit = build_glitchy_circuit()
         self.sim_result_log: List[str] = []
         self.stimuli: List[Tuple[int, str, int]] = []
 
@@ -223,7 +237,6 @@ class GlitchSimulatorApp:
         style.configure("TLabelframe", padding=8)
         style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
 
-    # Extracted massive layout block into logical, human-readable helper components
     def _build_layout(self) -> None:
         self.main = ttk.Frame(self.root, padding=12)
         self.main.pack(fill="both", expand=True)
@@ -268,7 +281,16 @@ class GlitchSimulatorApp:
                 ttk.Entry(row, textvariable=var, width=24).pack(side="left", fill="x", expand=True)
 
         ttk.Button(build_box, text="Add Gate", command=self.add_gate_from_form).pack(fill="x", pady=(8, 4))
-        ttk.Button(build_box, text="Load Sample", command=self.load_sample).pack(fill="x", pady=4)
+        
+        # --- NEW: Sample Selection Layout ---
+        sample_frame = ttk.Frame(build_box)
+        sample_frame.pack(fill="x", pady=4)
+        
+        self.sample_choice_var = tk.StringVar(value="Glitchy Circuit")
+        ttk.Combobox(sample_frame, textvariable=self.sample_choice_var, values=["Glitchy Circuit", "Stable Circuit"], state="readonly", width=14).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ttk.Button(sample_frame, text="Load Sample", command=self.load_sample).pack(side="right")
+        # ------------------------------------
+
         ttk.Button(build_box, text="Save Circuit", command=self.save_circuit).pack(fill="x", pady=4)
         ttk.Button(build_box, text="Load Circuit", command=self.load_circuit).pack(fill="x", pady=4)
 
@@ -463,10 +485,17 @@ class GlitchSimulatorApp:
         self._refresh_stimuli_view()
 
     def load_sample(self) -> None:
-        self.circuit = build_sample_circuit()
-        self.stimuli = [(1, "A", 1), (3, "A", 0), (5, "B", 0), (8, "A", 1)]
+        choice = self.sample_choice_var.get()
+        
+        if choice == "Stable Circuit":
+            self.circuit = build_stable_circuit()
+            self.stimuli = [(2, "A", 1), (4, "B", 1), (10, "A", 0), (12, "B", 0)]
+        else:
+            self.circuit = build_glitchy_circuit()
+            self.stimuli = [(1, "A", 1), (3, "A", 0), (5, "B", 0), (8, "A", 1)]
+            
         self._refresh_all_views()
-        self._refresh_result_text("Loaded sample circuit and sample stimuli.\n")
+        self._refresh_result_text(f"Loaded '{choice}' and relevant stimuli.\n")
 
     def run_simulation(self) -> None:
         try:
@@ -480,7 +509,6 @@ class GlitchSimulatorApp:
             messagebox.showwarning("No gates", "Add at least one gate before running the simulation.")
             return
 
-        # Reset state history before running
         for wire in self.circuit.wires.values():
             wire.history = [(0, wire.value)]
 
